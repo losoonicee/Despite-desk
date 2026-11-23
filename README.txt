@@ -1,14 +1,30 @@
 DISPUTE DESK 2, HOME SCREEN APP
-Version b78a6ace36
+Version 171e89c00c
 
 WHAT THIS IS
-Dispute Desk 2 as an app on your iPhone Home Screen. It opens full screen and works with no signal. It has a Home screen, five tabs (Home, Case, Evidence, Letters, Send), a Learn page, and a light or dark look. It can keep your case and your evidence photos on the phone, but only if you turn on "Save this case on this device" on the Home screen. It starts off.
+Dispute Desk 2 as an app on your iPhone Home Screen. It opens full screen and works with no signal. It has a Home screen, five tabs (Home, Case, Evidence, Letters, Send), a Learn page, and a light or dark look. It can read your plan, your letters and the Learn page out loud. With a Claude key of your own, it can also read an entry from your report and fill in the item for you. It can keep your case and your evidence photos on the phone, but only if you turn on "Save this case on this device" on the Home screen. It starts off.
 
 WHAT IT CAN'T DO
 - It doesn't mail letters, call anyone, or file the FTC form for you. You do those.
-- "Read it for me" (the Claude intake box) only works in the version inside Claude. It isn't in this app.
-- Nothing leaves your phone. There is no account and no server.
+- "Read it for me" needs a Claude key from your own Anthropic account (see below). Without one, you fill the item in by hand.
+- There is no account and no server of mine. Nothing leaves your phone, except when you press Read it for me with your own key: then what you pasted or added goes straight to Anthropic.
 - It uses no company logos. The round badges next to creditor names are made up from the first letters of the name.
+
+READ IT FOR ME, WITH YOUR OWN CLAUDE KEY
+- What it does: on the Case screen you paste an entry from your report or a collector's letter, or add up to 3 screenshots. Claude fills in the item. You check every box.
+- It needs a key from your own Anthropic account at platform.claude.com. That is separate from the Claude chat app, and a Claude chat plan does not pay for it. Anthropic bills each read to your account. One read usually costs a few cents at most. In the Anthropic Console you can also set a monthly spend limit.
+- To get a key: open platform.claude.com in Safari and sign in. Add a few dollars of credit under Billing. Open Settings, then API keys, then Create key. Copy the key. It starts with sk-ant- and is shown only once.
+- To use it: open Case, find Read it for me, paste the key, and tap Connect. (The Home screen has a Read it for me shortcut to the same place.)
+- Where the key lives: in memory only, until you close the app. If you tick "Remember it on this phone" it is kept in this browser on this phone with no password, so anyone who opens the app on this phone can use it. If the app is on GitHub Pages, every page hosted under the same yourname.github.io address shares that storage, so tick Remember only if this is the only app there. Clear everything and Forget key both erase it.
+- Where your text goes: from this phone straight to Anthropic's Claude service, using your key, and nowhere else. Text that looks like a Social Security or long account number is removed before it is sent. Screenshots go as they are, so cover those numbers first.
+- Not tried with a real key or on a real iPhone. If something goes wrong, the app shows what Claude answered, and a key that Claude refuses is erased.
+
+LISTEN (READ ALOUD)
+- Tap Listen on your plan or on a letter (both are on the Letters screen, and the letter's button is on the Send screen too), or on the Learn page. The phone reads it with its own voice. A bar above the tabs has Pause, Stop and a speed choice.
+- Pick the voice and speed on the Home screen under Read aloud. Better voices can be added in Settings, Accessibility, Spoken Content, Voices.
+- If you hear nothing: turn the volume up, check the silent switch, and open the app from its Home Screen icon.
+- It needs no key and sends nothing anywhere. It stops when you change screens.
+- Not tried on a real iPhone. If the voice doesn't work there, everything else still does.
 
 PUT IT ON YOUR HOME SCREEN, USING ONLY YOUR iPHONE
 Apple only lets a website go on the Home Screen from an https address, so the 10 files in this folder have to be on a website once. GitHub Pages does that for free. These steps match GitHub's and Apple's own help pages. They have not been tried on a real iPhone, so if a screen looks different, tell me what it says.
@@ -37,7 +53,8 @@ GOOD TO KNOW
 - Saving is a choice and starts off. With it off, nothing about the case is written to the phone, and closing the app clears the case and the evidence photos. Leaving the app for a while can also reload it, so turn on "Save this case on this device" on the Home screen if you will step away.
 - Evidence photos and PDFs live on the phone only. They are never uploaded and never go into a case code. Each file can be up to 12 MB. Cover Social Security and full account numbers before you take a photo.
 - A drawn or typed signature is never saved and is never in a case code. You sign again after closing the app.
-- "Start a new person's case" (on the Home screen) clears the last person's details, addresses, letters, signature, evidence files and any saved copy, and turns saving back off.
+- "Start a new person's case" (on the Home screen) clears the last person's details, addresses, letters, signature, evidence files and any saved copy, and turns saving back off. It keeps your Claude key.
+- "Clear everything" (at the bottom of the Home screen) does all of that and also erases the Claude key.
 - Cases stay in the app only. Use "Copy case code" under "Move this case" on the Send screen to back one up or move it to another device. The code has no signature and no files in it.
 - To save a letter as a PDF, tap Save as PDF. The iPhone share sheet opens: Save to Files, Print, Mail, AirDrop.
 - To update the app, upload the new files to the same repository with the same names (Add file, Upload files). The app shows "A new version is ready" the next time it opens online. Tap Update.

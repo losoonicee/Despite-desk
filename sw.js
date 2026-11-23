@@ -1,6 +1,6 @@
 /* Dispute Desk 2 service worker. Keeps the app on the device so it opens with no connection.
    The version below changes on every build, which is what lets a new copy replace the old one. */
-var VERSION = 'b78a6ace36';
+var VERSION = '171e89c00c';
 var CORE = 'dd2-core-' + VERSION;
 var FONTS = 'dd2-fonts';
 var FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-192.png', 'icon-maskable-512.png', 'apple-touch-icon.png', 'favicon.png'];

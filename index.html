@@ -20,7 +20,199 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&family=Source+Serif+4:wght@400;600&display=swap">
 <style>:root{padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
-<script>window.DD_APP=true;window.DD_VERSION="b78a6ace36";</script>
+<script>window.DD_APP=true;window.DD_VERSION="171e89c00c";</script>
+<script>
+/* Dispute Desk 2: use your own Claude key for "Read it for me" in the Home Screen app.
+   Only the installable app carries this file. The page inside Claude uses Claude's own sample feature and never has a key.
+   The key lives in memory until the app closes, unless the person ticks "Remember on this phone".
+   It is sent to one place only: https://api.anthropic.com. Nothing here touches the case, the letters or any other site. */
+(function () {
+  'use strict';
+  var API = 'https://api.anthropic.com/v1/messages';
+  var STORE = 'dd2:aikey';
+  var MODELS = ['claude-sonnet-5-5', 'claude-haiku-5-5'];
+  var MAX_TOKENS = 2500, TIMEOUT_MS = 90000, PASS_BYTES = 3300000, LONG_EDGE = 2576;
+  var SYSTEM = 'Reply with one JSON object and nothing else. No explanation and no markdown fences.';
+  var mem = '', loaded = false;
+
+  function clean(k) {
+    return String(k == null ? '' : k).replace(/\s+/g, '').replace(/^["'`‘’“”]+|["'`‘’“”]+$/g, '');
+  }
+  /* Only a key that starts with sk-ant- is ever accepted, so a key for some other service can never be sent to Anthropic by mistake. */
+  function valid(k) { return /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(clean(k)); }
+  function supported() { return typeof window.fetch === 'function' && typeof window.AbortController === 'function'; }
+
+  function store(k) {
+    try {
+      if (k) window.localStorage.setItem(STORE, k); else window.localStorage.removeItem(STORE);
+      return true;
+    } catch (e) { return false; }
+  }
+  function load() {
+    if (loaded) return;
+    loaded = true;
+    try {
+      var v = clean(window.localStorage.getItem(STORE));
+      if (v && valid(v)) mem = v; else if (v) window.localStorage.removeItem(STORE);
+    } catch (e) { /* storage is blocked, so the key lives in memory only */ }
+  }
+  function get() { load(); return mem; }
+  function remembered() {
+    try { return !!window.localStorage.getItem(STORE); } catch (e) { return false; }
+  }
+  /* keep = true writes the key to this phone. Anything else keeps it in memory and removes any stored copy. */
+  function set(k, keep) {
+    load();
+    k = clean(k);
+    if (!valid(k)) return false;
+    mem = k;
+    if (keep) { if (!store(k)) return 'memory'; } else store('');
+    return true;
+  }
+  function forget() { mem = ''; loaded = true; store(''); }
+  function tail() { load(); return mem ? mem.slice(-4) : ''; }
+
+  function fail(code, msg, bad) { var e = { code: code }; if (msg) e.dd2msg = msg; if (bad) e.dd2bad = true; return e; }
+
+  /* ---------- screenshots: pass small ones through, shrink big ones ---------- */
+  function toBase64(blob) {
+    return new Promise(function (ok, no) {
+      var r = new FileReader();
+      r.onload = function () { var s = String(r.result || ''); var i = s.indexOf(','); if (i < 0) no(fail('image_rejected')); else ok(s.slice(i + 1)); };
+      r.onerror = function () { no(fail('image_rejected')); };
+      r.readAsDataURL(blob);
+    });
+  }
+  function redraw(blob, scale, q) {
+    return new Promise(function (ok, no) {
+      var url = '', img = new Image();
+      function done(fn, v) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } fn(v); }
+      img.onload = function () {
+        var w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { done(no, fail('image_rejected')); return; }
+        var s = Math.min(1, scale, LONG_EDGE / Math.max(w, h));
+        var cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.round(w * s)); cv.height = Math.max(1, Math.round(h * s));
+        var cx = cv.getContext('2d');
+        if (!cx) { done(no, fail('image_rejected')); return; }
+        cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+        cx.drawImage(img, 0, 0, cv.width, cv.height);
+        cv.toBlob(function (b) { if (b) done(ok, b); else done(no, fail('image_rejected')); }, 'image/jpeg', q);
+      };
+      img.onerror = function () { done(no, fail('image_rejected')); };
+      try { url = URL.createObjectURL(blob); } catch (e) { no(fail('image_rejected')); return; }
+      img.src = url;
+    });
+  }
+  function fit(blob) {
+    if (blob.size <= PASS_BYTES) return Promise.resolve(blob);
+    return redraw(blob, 1, 0.88).then(function (b) {
+      return b.size <= PASS_BYTES ? b : redraw(blob, 0.7, 0.8).then(function (b2) {
+        return b2.size <= PASS_BYTES ? b2 : redraw(blob, 0.45, 0.75);
+      });
+    });
+  }
+  function imageBlocks(list) {
+    var out = [], chain = Promise.resolve();
+    list.forEach(function (f) {
+      chain = chain.then(function () {
+        return fit(f).then(function (b) {
+          var t = /^image\/(png|jpeg|webp|gif)$/.test(b.type) ? b.type : 'image/jpeg';
+          return toBase64(b).then(function (data) { out.push({ type: 'image', source: { type: 'base64', media_type: t, data: data } }); });
+        });
+      });
+    });
+    return chain.then(function () { return out; });
+  }
+
+  /* ---------- the request, and what to say for every way it can fail ---------- */
+  function apiError(status, data, text) {
+    var er = data && data.error ? data.error : {}, type = String(er.type || ''), msg = String(er.message || '').replace(/\s+/g, ' ').slice(0, 160);
+    var e = { code: 'api', dd2status: status };
+    if (status === 401 || type === 'authentication_error') {
+      e.code = 'bad_key'; e.dd2bad = true; e.dd2msg = 'Claude did not accept that key. Check it, or make a new one at platform.claude.com.';
+    } else if (status === 402 || type === 'billing_error' || /credit balance|purchase credits|plans & billing/i.test(msg)) {
+      e.code = 'billing'; e.dd2msg = 'Your Anthropic account is out of credit. Add credit at platform.claude.com, then try again.';
+    } else if (status === 403 || type === 'permission_error') {
+      e.code = 'forbidden'; e.dd2msg = 'That key is not allowed to do this. Make a new key and try again.';
+    } else if (status === 404 || type === 'not_found_error') {
+      e.code = 'no_model'; e.dd2msg = 'Claude could not find its reading model. Try again later.';
+    } else if (status === 413 || type === 'request_too_large') {
+      e.code = 'prompt_too_large'; e.dd2msg = 'That is too much to send. Paste less, or remove a screenshot.';
+    } else if (status === 429 || type === 'rate_limit_error') {
+      e.code = 'rate_limited'; e.dd2msg = 'Too many requests, or your account limit was reached. Wait a minute and try again.';
+    } else if (status >= 500 || type === 'overloaded_error' || type === 'api_error' || type === 'timeout_error') {
+      e.code = 'busy'; e.dd2msg = 'Claude is busy right now. Try again in a minute.';
+    } else if (/image|media/i.test(msg)) {
+      e.code = 'image_rejected';
+    } else {
+      e.dd2msg = 'Claude said: ' + (msg || 'something went wrong') + ' (' + (status || 'no code') + ')';
+    }
+    return e;
+  }
+  function parse(data) {
+    if (!data || !Array.isArray(data.content)) throw fail('empty_completion');
+    if (data.stop_reason === 'refusal') throw fail('refused');
+    var text = data.content.filter(function (b) { return b && b.type === 'text'; }).map(function (b) { return b.text || ''; }).join('');
+    if (!text.trim()) throw fail('empty_completion');
+    if (data.stop_reason === 'max_tokens') throw fail('invalid_json');
+    var s = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+    var i = s.indexOf('{'), j = s.lastIndexOf('}'), v = null;
+    if (i < 0 || j <= i) throw fail('invalid_json');
+    try { v = JSON.parse(s.slice(i, j + 1)); } catch (e) { throw fail('invalid_json'); }
+    if (!v || typeof v !== 'object' || Array.isArray(v)) throw fail('invalid_json');
+    return v;
+  }
+  function send(key, i, content, signal) {
+    var body = { model: MODELS[i], max_tokens: MAX_TOKENS, system: SYSTEM, messages: [{ role: 'user', content: content }] };
+    return window.fetch(API, {
+      method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal: signal,
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      return res.text().then(function (txt) {
+        var data = null;
+        try { data = JSON.parse(txt); } catch (e) { /* not JSON */ }
+        if (!res.ok) throw apiError(res.status, data, txt);
+        return data;
+      });
+    }).then(function (data) { return parse(data); }, function (e) {
+      if (e && e.code === 'no_model' && i + 1 < MODELS.length) return send(key, i + 1, content, signal);
+      throw e;
+    });
+  }
+  function normalize(e, timedOut) {
+    if (e && typeof e.code === 'string' && !e.name) return e;
+    if (e && e.name === 'AbortError') return timedOut ? fail('timeout', 'Claude took too long. Try again, or paste less.') : fail('cancelled');
+    return fail('network', 'Could not reach Claude. Check your connection and try again.');
+  }
+
+  /* ask(prompt, { images: [Blob], signal }) resolves to the parsed JSON object. */
+  function ask(prompt, opts) {
+    opts = opts || {};
+    var key = get();
+    if (!key) return Promise.reject(fail('no_key', 'Add your Claude key first.'));
+    if (window.navigator && window.navigator.onLine === false) return Promise.reject(fail('network', 'No connection. Reading needs one. Try again when you are online.'));
+    var ctl = new AbortController(), timedOut = false;
+    var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, TIMEOUT_MS);
+    function stop() { ctl.abort(); }
+    if (opts.signal) { if (opts.signal.aborted) stop(); else opts.signal.addEventListener('abort', stop); }
+    function end() { clearTimeout(timer); if (opts.signal) opts.signal.removeEventListener('abort', stop); }
+    return imageBlocks(opts.images || []).then(function (blocks) {
+      if (ctl.signal.aborted) throw { name: 'AbortError' };
+      return send(key, 0, blocks.concat([{ type: 'text', text: String(prompt) }]), ctl.signal);
+    }).then(function (v) { end(); return v; }, function (e) { end(); throw normalize(e, timedOut); });
+  }
+
+  window.DD2KeyAI = { supported: supported, valid: valid, clean: clean, get: get, set: set, forget: forget, remembered: remembered, tail: tail, ask: ask };
+})();
+
+</script>
 </head>
 <body>
 
@@ -939,8 +1131,10 @@ mark.blank { border-radius: 6px; }
 .ev-link:hover { border-color: var(--accent); }
 .ev-link .av { background: linear-gradient(135deg, #34D399, #0EA5A0); }
 .ev-link-t { display: grid; gap: 2px; min-width: 0; }
-.ev-link-t b { font: 800 15px/1.25 var(--font-head); }
-.ev-link-t span { font-size: 13.5px; line-height: 1.35; color: var(--ink-2); }
+.ev-link-t b { font: 800 15px/1.25 var(--font-head); display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.ev-link-t > span { font-size: 13.5px; line-height: 1.35; color: var(--ink-2); }
+.ai-link { border-color: var(--accent-line); background: linear-gradient(135deg, var(--accent-soft), transparent 70%), var(--panel); }
+.ai-link .av { background: linear-gradient(135deg, #8B5CFF, #3B82F6); box-shadow: 0 6px 16px -6px rgba(99, 102, 241, .8); }
 .ev-link .go { width: 20px; height: 20px; color: var(--accent); }
 .viewer { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 18px; background: rgba(4, 6, 16, .86); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .viewer[hidden] { display: none; }
@@ -1012,6 +1206,53 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 }
 @media print { #confetti, .viewer { display: none !important; } }
 
+/* ---------- Read it for me with your own Claude key ---------- */
+.ai-key { display: grid; gap: 14px; padding: 16px; border-radius: 20px; border: 1px solid var(--accent-line); background: var(--accent-soft); min-width: 0; }
+.ai-key > div { display: grid; gap: 14px; min-width: 0; }
+.ai-key .hint { margin: 0; }
+.keybox { -webkit-text-security: disc; letter-spacing: .06em; font-family: var(--font-code); }
+.keysteps { margin: 0; }
+.keysteps li { color: var(--ink-2); font-size: 14px; }
+.key-on { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+.key-on .av { background: linear-gradient(135deg, #34D399, #0EA5A0); }
+.key-t { display: grid; gap: 2px; min-width: 0; }
+.key-t b { font: 800 14.5px/1.25 var(--font-head); }
+.key-t small { color: var(--ink-2); font-size: 13px; line-height: 1.35; }
+.ai-key .ai-actions { align-items: center; }
+
+/* ---------- Listen: the phone reads a letter, the plan or your rights ---------- */
+html:not(.can-say) [data-listen], html:not(.can-say) .listen-row, html:not(.can-say) #sayBar, html:not(.can-say) #sayCard { display: none !important; }
+.listen .ic { width: 1.2em; height: 1.2em; }
+.listen[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.listen-row { margin: 12px 0 6px; }
+.rights .listen-row { margin: 0 0 2px; }
+.say-set { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 380px) { .say-set { grid-template-columns: minmax(0, 1fr); } }
+.saybar { position: fixed; z-index: 35; left: max(10px, env(safe-area-inset-left, 0px)); right: max(10px, env(safe-area-inset-right, 0px)); bottom: calc(88px + env(safe-area-inset-bottom, 0px)); max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; align-items: center; padding: 10px 12px 12px; border-radius: 22px; border: 1px solid var(--accent-line); background: var(--glass); -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6); box-shadow: 0 18px 36px -16px rgba(0, 0, 0, .65); }
+.say-top { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.say-top .av { width: 36px; height: 36px; flex: none; background: var(--grad-btn); }
+.say-t { display: grid; min-width: 0; }
+.say-t b { font: 800 14px/1.2 var(--font-head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.say-t small { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.say-btns { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 6px; }
+.say-btns .btn.sm { min-height: 40px; padding: 0 12px; }
+.say-spd select { min-height: 40px; width: auto; padding: 0 8px; font-size: 14px; border-radius: 14px; }
+.say-meter { grid-column: 1 / -1; grid-row: 2; height: 4px; border-radius: 4px; background: var(--line-2); overflow: hidden; }
+.say-meter i { display: block; height: 100%; width: 0; background: var(--grad); transition: width .3s ease; }
+.say-hint { grid-column: 1 / -1; grid-row: 3; margin: 2px 0 0; font-size: 13px; line-height: 1.4; color: var(--ink-2); }
+html.saying body { padding-bottom: 84px; }
+html.saying .toast { bottom: calc(170px + env(safe-area-inset-bottom, 0px)); }
+@media (max-width: 400px) { .say-top .av { display: none; } }
+@media (max-width: 340px) {
+  /* a 320-wide phone: the buttons drop to their own row so the title keeps room */
+  .say-btns { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; }
+  .say-meter { grid-row: 3; }
+  .say-hint { grid-row: 4; }
+  html.saying .toast { bottom: calc(222px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (prefers-reduced-motion: reduce) { .say-meter i { transition: none; } }
+@media print { .saybar { display: none !important; } }
+
 </style>
 <script>try{var t=window.localStorage.getItem('dd2:theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
 <svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
@@ -1068,6 +1309,8 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></symbol>
 <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3.5a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.2h5c0-.9.4-1.6 1.1-2.2A6 6 0 0 0 12 3.5z"/></symbol>
 <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.5 21V4"/><path d="M5.5 5h11l-2 3.5 2 3.5h-11"/></symbol>
+<symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12.5 19V5L7.5 9.5z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M18.6 6.4a8 8 0 0 1 0 11.2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4"/><path d="M10.8 12.7L20 3.5"/><path d="M16.5 7l2.5 2.5"/><path d="M13.8 9.7l2 2"/></symbol>
 </svg>
 
 
@@ -1096,6 +1339,11 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 <main class="wrap main">
   <section class="home st0" id="home" aria-label="Home">
     <div class="hero" id="homeHero"></div>
+    <button type="button" class="ev-link ai-link" id="homeAi" data-hero="read" hidden>
+      <span class="av" aria-hidden="true"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-spark"/></svg></span>
+      <span class="ev-link-t"><b>Read it for me <span class="tag">Claude</span></b><span id="homeAiSub">Paste an entry from your report or a collector's letter, or add a screenshot. Claude fills in the item and you check it.</span></span>
+      <svg class="ic go" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg>
+    </button>
     <section class="card prog" id="homeProg" aria-label="Progress"></section>
     <div class="hm-tiles" id="homeTiles"></div>
     <section class="card deadline" id="homeDeadline" aria-label="Next date" hidden></section>
@@ -1113,6 +1361,20 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
         </div>
       </section>
 
+    <section class="card" id="sayCard" aria-labelledby="sayH" hidden>
+      <h2 class="card-h" id="sayH">Read aloud</h2>
+      <div class="card-b">
+        <p class="hint">Tap Listen on a letter, your plan or the Learn page and your phone reads it to you. Pick the voice and speed here. Nothing is sent anywhere.</p>
+        <div class="say-set">
+          <label class="fld"><span>Voice</span><select id="sayVoice"><option value="">Automatic</option></select></label>
+          <label class="fld"><span>Speed</span><select id="saySpeed"></select></label>
+        </div>
+        <div><button type="button" class="btn sm listen" data-listen="sample" aria-pressed="false"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-speaker"/></svg><span class="lt">Hear a sample</span></button></div>
+        <details class="more"><summary>No sound, or want a nicer voice?</summary>
+          <p class="hint">Turn the volume up and check the silent switch. Better voices can be added in Settings, Accessibility, Spoken Content, Voices, and may then show in the list. Voice can be blocked inside the Claude app, so open Dispute Desk from its Home Screen icon.</p>
+        </details>
+      </div>
+    </section>
     <section class="card" id="lookCard" aria-labelledby="lookH">
       <h2 class="card-h" id="lookH">Look</h2>
       <div class="card-b">
@@ -1405,6 +1667,8 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 
           <div class="stale st23" id="staleBox" role="status" hidden></div>
 
+          <div class="listen-row st23"><button type="button" class="btn sm listen" id="letterListen" data-listen="letter" aria-pressed="false"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-speaker"/></svg><span class="lt">Listen to this letter</span></button></div>
+
           <div class="desk st23"><article class="sheet" id="sheetBox"></article></div>
 
           <div class="lbody">
@@ -1498,7 +1762,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 <footer class="wrap foot foot-pages">
   <details class="more foot-more"><summary>About, privacy and sources</summary>
   <p><b>What this is.</b> Dispute Desk drafts letters from the facts you enter, following the federal baseline in <a href="https://frenny-notes-hub.friendlyfrenny22.chatgpt.site" target="_blank" rel="noopener">Frenny Credit Notes</a> (FCRA, FDCPA, Regulation V). It isn't a law firm and doesn't give legal advice. It doesn't mail, file or contact anyone for you. State law can add protections or change deadlines. If you do this for clients as a business, check the credit repair rules, federal and your state's, with a lawyer.</p>
-  <p><b>Your data.</b> Nothing about your case is saved unless you turn on "Save this case on this device". When it is on, your work, and any photos or PDFs you add under Evidence, are kept in this browser on this device so they are here when you come back, and inside Claude a private copy of the case (not the files) is also kept in your Claude account for this page. A drawn signature is never saved. Small settings, like your light or dark choice, are remembered either way. Text and screenshots go to Claude only when you press "Read it for me", and that works only inside Claude. "Clear everything" erases the case, the files and every saved copy.</p>
+  <p><b>Your data.</b> Nothing about your case is saved unless you turn on "Save this case on this device". When it is on, your work, and any photos or PDFs you add under Evidence, are kept in this browser on this device so they are here when you come back, and inside Claude a private copy of the case (not the files) is also kept in your Claude account for this page. A drawn signature is never saved. Small settings, like your light or dark choice, are remembered either way. Text and screenshots go to Claude only when you press "Read it for me". Inside Claude they go through Claude. In the Home Screen app they go straight to Anthropic with a key you add yourself, and nowhere else. "Listen" uses your phone's own voice and sends nothing. "Clear everything" erases the case, the files, every saved copy and a Claude key if you added one.</p>
   <p><b>Addresses and dates.</b> Every bureau address in the letters is built in: each bureau's dispute address, and its fraud and identity theft address for the block letter. They are as of <span id="addrAsOf">this month</span>, from each bureau's own pages and the CFPB. Check each bureau's own site before you mail. A creditor or collector in the built-in list (the names that come up as you type its name) also has its address filled in, read from the company's own website or forms and checked <span id="credAsOf">this month</span>. A company that is not in the list asks for its address. Check the address on your statement or notice before you mail. The breach list is as of <span id="breachAsOf">this month</span> and is not complete.</p>
   </details>
   <div class="foot-links">
@@ -4855,6 +5119,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     if (P.lane === 'accurate' && P.checkFlags) eyebrow = 'Check first';
     h += '<div class="hl"><div class="eyebrow">' + esc(eyebrow) + '</div><h2>' + esc(P.headline) + '</h2>';
     if (P.chips.length) h += '<div class="trig">' + P.chips.map(function (c) { return '<span' + (c.auto ? ' class="auto"' : '') + '>' + esc(c.t) + (c.auto ? '<i>found for you</i>' : '') + '</span>'; }).join('') + '</div>';
+    h += listenRow('plan', 'Listen to this plan');
     h += '</div>';
     if (P.banners.length) h += '<div class="bans">' + P.banners.map(function (b) { return '<div class="ban ' + esc(b.lvl) + '"><span class="lvl">' + esc(LVL[b.lvl] || 'Note') + '</span><b>' + esc(b.title) + '</b><p>' + esc(b.text) + '</p></div>'; }).join('') + '</div>';
     h += checksHtml(P);
@@ -5585,7 +5850,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       return;
     }
     ui.clearArmed = false; clearTimeout(ui.clearT); b.textContent = 'Clear everything';
-    wipeCase('Cleared everything: the details, items, addresses, signature and every saved copy.');
+    wipeCase('Cleared everything: the details, items, addresses, signature and every saved copy.' + studioForgetKey());
   }
 
 
@@ -6046,7 +6311,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       '<li>Typing: tap the microphone on the keyboard to talk instead of type. The Return key jumps to the next box. For your own name and address, tap the suggestion above the keyboard.</li>' +
       '<li>Signing: draw with your finger. Turn the phone sideways for a bigger box. Tap Clear to start over.</li>' +
       '<li>PDFs and printing: Save as PDF hands you the file. In the Home Screen app, the iPhone share sheet opens with Save to Files, Print, Mail and AirDrop.</li>' +
-      '<li>Moving around: the five buttons at the bottom of the screen are Home, Case, Evidence, Letters and Send. Learn is at the top right.</li></ul></div>';
+      '<li>Moving around: the five buttons at the bottom of the screen are Home, Case, Evidence, Letters and Send. Learn is at the top right.</li>' + (canSay() ? '<li>Listening: tap Listen on your plan, a letter or the Learn page and the phone reads it to you. Pick the voice and speed on Home. If you hear nothing, check the volume and the silent switch.</li>' : '') + '</ul></div>';
     h += '<div class="tool-sec help-sec"><h3 class="tool-h">What a written dispute does to a collector</h3>';
     h += '<p class="hl-q">' + esc(D.VALIDATION_RULE) + '</p>';
     h += '<p class="hint tap">' + ext(D.REGF_URL, D.REGF_LABEL) + '</p>';
@@ -6091,7 +6356,8 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       '<li>Saving is off until you turn on "Save this case on this device" on the Home screen. Off means nothing is written anywhere, and closing or refreshing the page clears the case. On an iPhone, leaving the page for a while can make it reload, which counts as refreshing.</li>' +
       '<li>On means your name, address, items and any bureau or company address you changed are kept in plain text in this browser, on this device. Anyone who opens this page on this device can read them, so leave it off on a shared device.</li>' +
       '<li>A drawn or typed signature is never saved, and is never in a case code. After you close the page you sign again.</li>' +
-      '<li>"Start a new person\'s case" clears everything about the last person, including any saved copy and any signature.</li></ul></div>';
+      '<li>"Start a new person\'s case" clears everything about the last person, including any saved copy and any signature.</li>' +
+      (window.DD_APP ? '<li>Read it for me needs a Claude key from your own Anthropic account. What you paste or add goes from this phone straight to Anthropic with that key, and nowhere else. The key lasts until you close the app, unless you tick Remember it on this phone. Clear everything erases it.</li>' : '<li>Read it for me runs through Claude. What you paste or add goes to Claude only when you press the button.</li>') + '</ul></div>';
     return h;
   }
   function doToolCopy() {
@@ -6125,6 +6391,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
   function aiBusy(b) { var r = $('#aiRun'), s = $('#aiStop'); if (r) r.disabled = b; if (s) s.hidden = !b; }
   function aiOff(msg) {
     ai.sample = null;
+    var homeAi = $('#homeAi'); if (homeAi) homeAi.hidden = true;
     var b = $('#aiBody');
     if (b) b.innerHTML = '<p class="lede">' + esc(msg) + '</p>';
   }
@@ -6156,6 +6423,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     aiMsg('');
   }
   function aiFail(e) {
+    if (e && e.dd2msg) { if (e.dd2bad) keyBad(e.dd2msg); else aiMsg(e.dd2msg, true); return; }
     var c = e && e.code;
     if (c === 'cancelled') { aiMsg('Stopped.'); return; }
     if (['not_granted', 'sampling_disabled', 'not_declared', 'capability_disabled', 'capability_removed'].indexOf(c) >= 0) {
@@ -6188,7 +6456,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     opts.signal = ai.ctl.signal;
     if (imgs.length) opts.images = imgs;
     aiBusy(true);
-    aiMsg('Reading it. The first time, Claude asks you to allow this.');
+    aiMsg(KA.on ? 'Reading it with your key.' : 'Reading it. The first time, Claude asks you to allow this.');
     var p;
     try { p = ai.sample.json(D.aiPrompt(m.text, imgs.length), opts); } catch (e) { p = Promise.reject({ code: 'invalid_request' }); }
     p.then(function (r) {
@@ -6203,7 +6471,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
   }
   function initAI() {
     var c = window.claude;
-    if (!c || typeof c.use !== 'function') return;
+    if (!c || typeof c.use !== 'function') { studioKeyAI(); return; }
     var p;
     try { p = c.use('sample'); } catch (e) { return; }
     if (!p || typeof p.then !== 'function') return;
@@ -6211,6 +6479,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       if (!s || typeof s.json !== 'function') return null;
       ai.sample = s;
       $('#aiCard').hidden = false;
+      var homeAi = $('#homeAi'); if (homeAi) homeAi.hidden = false;
       return typeof s.limits === 'function' ? s.limits().catch(function () { return null; }) : null;
     }).then(function (caps) {
       ai.caps = caps || null;
@@ -6620,6 +6889,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     var a = b.getAttribute('data-hero');
     if (a === 'start') { startFresh(false); setStep(1); setTimeout(function () { focusSel('#typeTiles input'); }, 60); return; }
     if (a === 'example') { setStep(2); return; }
+    if (a === 'read') { setStep(1); setTimeout(function () { goTo($('#aiCard')); focusSel(KA.on && $('#aiKeyForm') && !$('#aiKeyForm').hidden ? '#aiKeyIn' : '#aiText'); }, 60); return; }
     if (a === 'add') { addItem(); return; }
     if (a === 'go') {
       var n = +b.getAttribute('data-step'), f = b.getAttribute('data-focus');
@@ -6754,6 +7024,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     try { window.localStorage.removeItem(EV_KEY); } catch (e) { /* ignore */ }
     idbDrop();
     evStatus('');
+    sayStop();
   }
   /* Turning saving on keeps the files on this phone. Turning it off first brings every stored file into memory, so it lasts until the page closes, and then erases the saved copies. */
   function studioSaving(on) {
@@ -6925,7 +7196,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
 
   /* ---------- Learn: your rights ---------- */
   function rightsHtml() {
-    var h = '<div class="rights">';
+    var h = '<div class="rights">' + listenRow('rights', 'Listen to this page');
     h += '<div class="r-card"><span class="av">' + ic('spark') + '</span><div><h4>How this works</h4><ol class="r-steps">' +
       '<li><span><b>Tell it what you see.</b> Pick the kind of item and add what the report shows. Add the records you have under Evidence.</span></li>' +
       '<li><span><b>Review the letters.</b> It picks the route and drafts each letter from your facts. You fill in the blanks and check every line.</span></li>' +
@@ -6977,6 +7248,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
   function studioStep() {
     if (ui.step === 0) homeRender();
     if (ui.step === 5) evSync();
+    saySync();
     var back = $('#backToLetter');
     if (back) back.textContent = ui.prevStep === 0 ? 'Back to Home' : 'Back to my case';
   }
@@ -6988,12 +7260,14 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
     var it = active(), pk = ui.pk, all = !!(pk && pk.total > 0 && pk.ready === pk.total);
     if (DS.cf.item === it.id && !DS.cf.was && all && !state.sample) confetti();
     DS.cf.item = it.id; DS.cf.was = all;
+    saySync();
     var back = $('#backToLetter');
     if (back) back.textContent = ui.prevStep === 0 ? 'Back to Home' : 'Back to my case';
   }
   function studioInit() {
     applyTheme(readTheme());
     evLoad();
+    sayInit();
     document.addEventListener('click', function (e) {
       var t = e.target, b;
       if (!t || !t.closest) return;
@@ -7012,6 +7286,407 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       if (el && el.getAttribute && el.getAttribute('data-ev-note') != null) onNote(el);
     });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') evViewClose(); });
+  }
+
+  /* ====================================================================================================
+     "Read it for me" with your own Claude key. Only the Home Screen app has window.DD2KeyAI,
+     so inside Claude none of this runs and Claude's own reader is used instead.
+     ==================================================================================================== */
+  var KA = { on: false, homeText: '' };
+  function keyLib() { var K = window.DD2KeyAI; return K && typeof K.supported === 'function' && K.supported() ? K : null; }
+  function keyMsg(msg, err) { var s = $('#aiKeyMsg'); if (!s) return; s.textContent = msg || ''; s.className = err ? 'ai-err' : 'ai-status'; }
+  function keyPanelHtml() {
+    return '<div id="aiKeyForm">' +
+      '<p class="hint"><b>One-time setup.</b> This app has no Claude of its own. To use Read it for me here, paste a Claude key from your own Anthropic account. Each read usually costs a few cents at most, and Anthropic bills it to that account. A Claude chat plan does not cover it.</p>' +
+      '<label class="fld"><span>Your Claude key</span><input type="text" id="aiKeyIn" class="keybox" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="sk-ant-" aria-describedby="aiKeyMsg"></label>' +
+      '<label class="opt"><input type="checkbox" id="aiKeyKeep"><span class="ot"><b>Remember it on this phone</b><small>Off, the app forgets the key when you close it. On, it stays here with no password, so anyone who opens the app can use it. Clear everything erases it.</small></span></label>' +
+      '<div class="ai-actions"><button type="button" class="btn primary" id="aiKeyGo">Connect</button><span class="ai-status" id="aiKeyMsg" role="status" aria-live="polite"></span></div>' +
+      '<details class="more"><summary>How to get a key</summary>' +
+      '<ol class="r-steps keysteps">' +
+      '<li><span>Open platform.claude.com in Safari and sign in, or make an account. It is separate from the Claude chat app.</span></li>' +
+      '<li><span>Add a few dollars of credit under Billing.</span></li>' +
+      '<li><span>Open Settings, then API keys, then Create key. Name it Dispute Desk.</span></li>' +
+      '<li><span>Copy the key. It starts with sk-ant- and is shown only once.</span></li>' +
+      '<li><span>Come back here, paste it above and tap Connect.</span></li></ol>' +
+      '<div class="r-links">' + ext('https://platform.claude.com/settings/keys', 'Open the key page', 'btn sm') + '</div>' +
+      '<p class="hint">In the Anthropic Console you can also set a monthly spend limit, so it can never cost more than you choose.</p></details>' +
+      '</div>' +
+      '<div class="key-on" id="aiKeyOn" hidden><span class="av" aria-hidden="true">' + ic('key') + '</span>' +
+      '<span class="key-t"><b>Using your Claude key</b><small>Ending <span id="aiKeyTail"></span>. <span id="aiKeyWhere"></span></small></span>' +
+      '<button type="button" class="btn sm" id="aiKeyForget">Forget key</button></div>';
+  }
+  function keySync() {
+    var K = keyLib();
+    if (!K || !KA.on) return;
+    var has = !!K.get(), form = $('#aiKeyForm'), on = $('#aiKeyOn'), box = $('#aiBox');
+    if (form) form.hidden = has;
+    if (on) on.hidden = !has;
+    if (box) box.hidden = !has;
+    var tl = $('#aiKeyTail'); if (tl) tl.textContent = K.tail();
+    var wh = $('#aiKeyWhere'); if (wh) wh.textContent = K.remembered() ? 'It is remembered on this phone.' : 'It lasts until you close the app.';
+    ai.sample = has ? { json: function (prompt, o) { return K.ask(prompt, { images: o && o.images, signal: o && o.signal }); } } : null;
+    var sub = $('#homeAiSub');
+    if (sub) sub.textContent = has ? KA.homeText : 'Add your own Claude key once. Then paste an entry or add a screenshot, and Claude fills in the item.';
+  }
+  function keyConnect() {
+    var K = keyLib(), inp = $('#aiKeyIn');
+    if (!K || !inp) return;
+    var v = K.clean(inp.value);
+    if (!v) { keyMsg('Paste your key first.', true); return; }
+    if (!K.valid(v)) { keyMsg('That does not look like a Claude key. It starts with sk-ant-.', true); return; }
+    var keep = !!($('#aiKeyKeep') && $('#aiKeyKeep').checked), r = K.set(v, keep);
+    inp.value = '';
+    keyMsg(r === 'memory' ? 'This browser would not remember it, so it lasts until you close the app.' : '');
+    keySync();
+    announce('Connected. Paste an entry or add a screenshot.');
+    setTimeout(function () { focusSel('#aiText'); }, 60);
+  }
+  function keyForget(note) {
+    var K = keyLib();
+    if (!K) return;
+    if (ai.ctl) { try { ai.ctl.abort(); } catch (e) { /* ignore */ } }
+    K.forget();
+    keySync();
+    keyMsg(note || 'The key is erased from this phone.');
+    var inp = $('#aiKeyIn'); if (inp) inp.value = '';
+  }
+  /* The key was refused (a wrong or deleted key): erase it and show the box again, with the reason. */
+  function keyBad(msg) {
+    keyForget('');
+    keyMsg(msg, true);
+    goTo($('#aiKey'));
+  }
+  function studioKeyAI() {
+    var K = keyLib(), card = $('#aiCard'), body = $('#aiBody'), box = $('#aiBox');
+    if (!K || !card || !body || !box || KA.on) return;
+    KA.on = true;
+    ai.caps = { images: { maxCount: 3, maxInputBytes: 20000000, mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] } };
+    var pick = $('#aiPick'); if (pick) pick.hidden = false;
+    var inp = $('#aiFile'); if (inp) inp.setAttribute('accept', ai.caps.images.mediaTypes.join(','));
+    var hint = box.querySelector('.hint');
+    if (hint) hint.textContent = 'It fills only what is blank and never makes up what the page doesn\'t show. It keeps only the last digits of an account number, never a full one. Text that looks like a Social Security or account number is removed before anything is sent. Screenshots go as they are, so cover those numbers first. What you send goes from this phone straight to Anthropic with your key, and nowhere else.';
+    var panel = document.createElement('div');
+    panel.className = 'ai-key'; panel.id = 'aiKey';
+    panel.innerHTML = keyPanelHtml();
+    body.insertBefore(panel, box);
+    var sub = $('#homeAiSub'); KA.homeText = sub ? sub.textContent : '';
+    card.hidden = false;
+    var home = $('#homeAi'); if (home) home.hidden = false;
+    var go = $('#aiKeyGo'); if (go) go.addEventListener('click', keyConnect);
+    var fg = $('#aiKeyForget'); if (fg) fg.addEventListener('click', function () { keyForget(); });
+    var kin = $('#aiKeyIn');
+    if (kin) kin.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); keyConnect(); } });
+    keySync();
+  }
+  /* "Clear everything" erases the key too. It returns the words to add to the confirmation, or nothing when there was no key. */
+  function studioForgetKey() {
+    var K = keyLib();
+    if (!K) return '';
+    var had = !!K.get();
+    K.forget();
+    if (KA.on) { keySync(); keyMsg(''); }
+    return had ? ' The Claude key was erased too.' : '';
+  }
+
+  /* ====================================================================================================
+     Listen: the phone reads a letter, your plan or your rights out loud, with the phone's own voices.
+     It needs no key and no account, and nothing is sent anywhere. A Pause and Stop bar sits above the tab bar while it plays.
+     ==================================================================================================== */
+  var SAY_KEY = 'dd2:say';
+  var SY = { on: false, paused: false, chunks: [], i: 0, tok: 0, kind: '', step: -1, rate: 1, voice: '', u: null, t: 0, w: 0, started: false, heard: false, voices: [], sig: '' };
+  var SAY_SAMPLE = 'This is how Dispute Desk reads to you. Tap Listen on a letter, on your plan, or on the Learn page. You can pause or stop at any time.';
+  var SAY_RATES = [[0.8, 'Slower'], [0.9, 'Slow'], [1, 'Normal'], [1.15, 'Fast'], [1.3, 'Faster']];
+  /* Controls and their labels, link buttons and the tick boxes under each step are left out. Small labels and the pills in a row each get their own pause. */
+  var SAY_SKIP = { BUTTON: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1, SVG: 1, SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, CANVAS: 1, IMG: 1, LABEL: 1 };
+  var SAY_SKIP_CLS = ['listen', 'r-links', 'sr', 'act', 'track'];
+  var SAY_BLOCK = { DIV: 1, P: 1, LI: 1, UL: 1, OL: 1, H1: 1, H2: 1, H3: 1, H4: 1, SECTION: 1, ARTICLE: 1, BR: 1, TABLE: 1, TR: 1, SMALL: 1 };
+  var SAY_BLOCK_CLS = ['lvl', 'st', 'chk-l', 'eyebrow'];
+
+  function canSay() {
+    try { return !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function'); } catch (e) { return false; }
+  }
+  function sayLoad() {
+    try {
+      var o = JSON.parse(window.localStorage.getItem(SAY_KEY) || '{}');
+      if (o && typeof o === 'object') {
+        if (typeof o.v === 'string') SY.voice = o.v;
+        if (typeof o.r === 'number' && o.r >= 0.5 && o.r <= 2) SY.rate = o.r;
+      }
+    } catch (e) { /* use the defaults */ }
+  }
+  function saySave() { try { window.localStorage.setItem(SAY_KEY, JSON.stringify({ v: SY.voice, r: SY.rate })); } catch (e) { /* ignore */ } }
+
+  /* The words to read. Buttons, boxes, icons and hidden parts are left out, and every line ends in a full stop so the voice pauses. */
+  function sayTidy(s) {
+    var lines = String(s).replace(/ /g, ' ').split(/\n+/).map(function (x) { return x.replace(/\s+/g, ' ').trim(); }).filter(Boolean);
+    return lines.map(function (x) { return /[.!?:;,]["')\]]*$/.test(x) ? x : x + '.'; }).join(' ');
+  }
+  function domText(root) {
+    var out = [];
+    function walk(n) {
+      if (n.nodeType === 3) { out.push(n.nodeValue); return; }
+      if (n.nodeType !== 1) return;
+      var tag = String(n.tagName).toUpperCase(), cl = n.classList, i;
+      if (SAY_SKIP[tag] || n.hidden || n.getAttribute('aria-hidden') === 'true') return;
+      for (i = 0; cl && i < SAY_SKIP_CLS.length; i++) if (cl.contains(SAY_SKIP_CLS[i])) return;
+      var blk = !!SAY_BLOCK[tag];
+      for (i = 0; !blk && cl && i < SAY_BLOCK_CLS.length; i++) if (cl.contains(SAY_BLOCK_CLS[i])) blk = true;
+      if (!blk && n.parentNode && n.parentNode.classList && n.parentNode.classList.contains('trig')) blk = true;
+      out.push(blk ? '\n' : ' ');
+      for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
+      out.push(blk ? '\n' : ' ');
+    }
+    if (root) walk(root);
+    return sayTidy(out.join(''));
+  }
+  function letterText() {
+    var x = ui.cur;
+    if (!x || !x.plain) return '';
+    return sayTidy(x.plain.replace(/\[([^\]\n]*)\]/g, function (m, lab) { return ' blank: ' + lab + ' '; }));
+  }
+  /* Short pieces, so one slow or failed piece never stops the rest, and so Pause can pick up from the same place. */
+  function sayChunks(text) {
+    var MAX = 190, sentences = [], s = '', i, n = text.length;
+    for (i = 0; i < n; i++) {
+      var ch = text.charAt(i);
+      s += ch;
+      if (ch === '.' || ch === '!' || ch === '?') {
+        while (i + 1 < n && /["')\]]/.test(text.charAt(i + 1))) { i++; s += text.charAt(i); }
+        if (i + 1 >= n || /\s/.test(text.charAt(i + 1))) { sentences.push(s.trim()); s = ''; }
+      }
+    }
+    if (s.trim()) sentences.push(s.trim());
+    var pieces = [];
+    sentences.forEach(function (p) {
+      while (p.length > MAX) {
+        var cut = Math.max(p.lastIndexOf(', ', MAX), p.lastIndexOf('; ', MAX), p.lastIndexOf(': ', MAX));
+        if (cut < 60) cut = p.lastIndexOf(' ', MAX);
+        if (cut < 1) cut = MAX - 1;
+        pieces.push(p.slice(0, cut + 1).trim());
+        p = p.slice(cut + 1).trim();
+      }
+      if (p) pieces.push(p);
+    });
+    var out = [];
+    pieces.forEach(function (p) {
+      var last = out.length - 1;
+      if (last >= 0 && out[last].length + 1 + p.length <= MAX) out[last] += ' ' + p; else out.push(p);
+    });
+    return out;
+  }
+
+  /* ---------- voices and speed ---------- */
+  function sayVoiceObj() {
+    var vs = SY.voices, want = null;
+    if (!vs.length) return null;
+    if (SY.voice) vs.forEach(function (v) { if (v.voiceURI === SY.voice) want = v; });
+    if (want) return want;
+    var en = vs.filter(function (v) { return /^en[-_]US/i.test(v.lang || ''); });
+    if (!en.length) en = vs.filter(function (v) { return /^en/i.test(v.lang || ''); });
+    if (!en.length) return null;
+    function score(v) { return (/premium|enhanced|siri/i.test(v.name) ? 4 : 0) + (v['default'] ? 2 : 0) + (v.localService ? 1 : 0); }
+    en.sort(function (a, b) { return score(b) - score(a); });
+    return en[0];
+  }
+  function sayVoices() {
+    try { SY.voices = Array.prototype.slice.call(window.speechSynthesis.getVoices() || []); } catch (e) { SY.voices = []; }
+    var sel = $('#sayVoice');
+    if (!sel) return;
+    var list = SY.voices.filter(function (v) { return /^en/i.test(v.lang || '') || v.voiceURI === SY.voice; }).slice(0, 40);
+    var sig = list.map(function (v) { return v.voiceURI; }).join('|') + '#' + SY.voice;
+    if (sig === SY.sig) return;
+    SY.sig = sig;
+    var h = '<option value="">Automatic</option>';
+    list.forEach(function (v) { h += '<option value="' + esc(v.voiceURI) + '">' + esc(v.name + (v.lang ? ' (' + v.lang + ')' : '')) + '</option>'; });
+    sel.innerHTML = h;
+    sel.value = SY.voice;
+    if (sel.value !== SY.voice) sel.value = '';
+  }
+  function sayRateOpts() {
+    return SAY_RATES.map(function (r) { return '<option value="' + r[0] + '">' + r[1] + '</option>'; }).join('');
+  }
+  function saySyncRate() {
+    ['#saySpeed', '#saySpeedBar'].forEach(function (id) {
+      var s = $(id);
+      if (!s) return;
+      var best = SAY_RATES[0][0];
+      SAY_RATES.forEach(function (r) { if (Math.abs(r[0] - SY.rate) < Math.abs(best - SY.rate)) best = r[0]; });
+      s.value = String(best);
+    });
+  }
+  function saySetRate(r) {
+    r = +r;
+    if (!(r >= 0.5 && r <= 2)) return;
+    SY.rate = r; saySave(); saySyncRate();
+    if (SY.on && !SY.paused) sayRestart();
+  }
+  function saySetVoice(uri) {
+    SY.voice = String(uri || ''); saySave();
+    if (SY.on && !SY.paused) sayRestart();
+  }
+  function sayRestart() {
+    var tok = ++SY.tok;
+    sayCancel();
+    setTimeout(function () { if (tok === SY.tok && SY.on && !SY.paused) sayPlay(); }, 140);
+  }
+
+  /* ---------- playing ---------- */
+  function sayCancel() { try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ } }
+  function sayHint(msg) { var h = $('#sayHint'); if (!h) return; h.textContent = msg || ''; h.hidden = !msg; }
+  function sayBarShow(on) {
+    var bar = $('#sayBar');
+    if (bar) bar.hidden = !on;
+    document.documentElement.classList.toggle('saying', !!on);
+  }
+  function sayMark() {
+    var list = document.querySelectorAll('[data-listen]');
+    Array.prototype.forEach.call(list, function (b) {
+      var on = SY.on && b.getAttribute('data-listen') === SY.kind, lt = b.querySelector('.lt');
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if (lt) {
+        if (!b.getAttribute('data-lt')) b.setAttribute('data-lt', lt.textContent);
+        lt.textContent = on ? 'Stop' : b.getAttribute('data-lt');
+      }
+    });
+    var p = $('#sayPause'); if (p) p.textContent = SY.paused ? 'Resume' : 'Pause';
+  }
+  function sayProgress() {
+    var n = SY.chunks.length, f = $('#sayFill'), t = $('#sayProg');
+    if (f) f.style.width = (n ? Math.min(100, Math.round(100 * SY.i / n)) : 0) + '%';
+    if (t) t.textContent = 'Part ' + Math.min(SY.i + 1, n) + ' of ' + n;
+  }
+  function sayStop() {
+    SY.tok++;
+    clearTimeout(SY.t); clearTimeout(SY.w);
+    sayCancel();
+    SY.on = false; SY.paused = false; SY.chunks = []; SY.i = 0; SY.kind = ''; SY.u = null;
+    sayHint('');
+    sayBarShow(false);
+    sayMark();
+  }
+  function sayDone() {
+    var f = $('#sayFill'); if (f) f.style.width = '100%';
+    sayStop();
+  }
+  function sayPlay() {
+    if (!SY.on || SY.paused) return;
+    var tok = SY.tok, text = SY.chunks[SY.i];
+    if (text == null) { sayDone(); return; }
+    var u = new window.SpeechSynthesisUtterance(text), v = sayVoiceObj();
+    if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
+    u.rate = SY.rate; u.pitch = 1; u.volume = 1;
+    SY.u = u; SY.started = false;
+    u.onstart = function () { if (tok !== SY.tok) return; SY.started = true; SY.heard = true; clearTimeout(SY.t); sayHint(''); };
+    function next() {
+      clearTimeout(SY.t); clearTimeout(SY.w);
+      SY.i++;
+      if (SY.i < SY.chunks.length) { sayProgress(); sayPlay(); } else sayDone();
+    }
+    u.onend = function () { if (tok === SY.tok) next(); };
+    u.onerror = function (e) {
+      if (tok !== SY.tok) return;
+      var er = e && e.error;
+      if (er === 'canceled' || er === 'interrupted') return;
+      clearTimeout(SY.w);
+      sayStop();
+      toastNote('The phone could not read that aloud. Try again, or pick another voice on Home.');
+    };
+    clearTimeout(SY.t); clearTimeout(SY.w);
+    /* If a piece never reports its end, move on after about twice the time it should take, so the reading cannot hang. */
+    SY.w = setTimeout(function () {
+      if (tok !== SY.tok || !SY.on || SY.paused) return;
+      SY.tok++; sayCancel();
+      next();
+    }, Math.round(1000 * (text.length / (12 * SY.rate) * 2 + 6)));
+    if (!SY.heard) SY.t = setTimeout(function () {
+      if (tok === SY.tok && !SY.started) sayHint('No sound yet. Turn the volume up and check the silent switch. Inside the Claude app voice may be blocked, so open Dispute Desk from its Home Screen icon.');
+    }, 3500);
+    try { window.speechSynthesis.speak(u); } catch (err) { sayStop(); }
+  }
+  function sayStart(kind) {
+    if (!canSay()) return;
+    var text = '', title = '';
+    if (kind === 'plan') { text = domText($('#plan')); title = 'Your plan'; }
+    else if (kind === 'letter') { text = letterText(); title = ui.cur && ui.cur.sheet ? 'The prep sheet' : 'The letter'; }
+    else if (kind === 'rights') { text = domText($('#toolBody .rights')); title = 'Your rights'; }
+    else if (kind === 'sample') { text = SAY_SAMPLE; title = 'A sample'; }
+    if (!text) { toastNote('There is nothing to read here yet.'); return; }
+    var busy = false;
+    try { busy = !!(window.speechSynthesis.speaking || window.speechSynthesis.pending); } catch (e) { busy = false; }
+    var tok = ++SY.tok;
+    clearTimeout(SY.t);
+    sayCancel();
+    SY.on = true; SY.paused = false; SY.kind = kind; SY.step = ui.step; SY.chunks = sayChunks(text); SY.i = 0; SY.heard = false;
+    var tt = $('#sayTitle'); if (tt) tt.textContent = title;
+    sayHint('');
+    sayBarShow(true); sayProgress(); sayMark();
+    /* The first piece starts right inside the tap, because iPhones only allow sound that a tap started. */
+    if (busy) setTimeout(function () { if (tok === SY.tok) sayPlay(); }, 90); else sayPlay();
+  }
+  function sayPause() {
+    if (!SY.on) return;
+    SY.tok++;
+    if (SY.paused) { SY.paused = false; sayMark(); sayPlay(); return; }
+    SY.paused = true; clearTimeout(SY.t); clearTimeout(SY.w); sayCancel(); sayHint(''); sayMark();
+  }
+  /* A screen change ends the reading, so it never talks over something else. */
+  function saySync() {
+    var ll = $('#letterListen');
+    if (ll) {
+      var want = ui.cur && ui.cur.sheet ? 'Listen to this sheet' : 'Listen to this letter', lt = ll.querySelector('.lt');
+      ll.setAttribute('data-lt', want);
+      if (lt && !(SY.on && SY.kind === 'letter')) lt.textContent = want;
+    }
+    if (!SY.on && !document.querySelector('[data-listen]')) return;
+    if (SY.on && SY.step !== ui.step) { sayStop(); return; }
+    sayMark();
+  }
+  function listenBtn(kind, label, cls) {
+    if (!canSay()) return '';
+    return '<button type="button" class="btn sm listen ' + (cls || '') + '" data-listen="' + kind + '" aria-pressed="false">' + ic('speaker') + '<span class="lt">' + esc(label || 'Listen') + '</span></button>';
+  }
+  function listenRow(kind, label) {
+    var b = listenBtn(kind, label);
+    return b ? '<div class="listen-row">' + b + '</div>' : '';
+  }
+  function sayInit() {
+    if (!canSay()) return;
+    document.documentElement.classList.add('can-say');
+    sayLoad();
+    var card = $('#sayCard'); if (card) card.hidden = false;
+    var sp = $('#saySpeed'); if (sp) sp.innerHTML = sayRateOpts();
+    var bar = document.createElement('div');
+    bar.className = 'saybar'; bar.id = 'sayBar'; bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Reading aloud'); bar.hidden = true;
+    bar.innerHTML = '<div class="say-top"><span class="av" aria-hidden="true">' + ic('speaker') + '</span><span class="say-t"><b id="sayTitle"></b><small id="sayProg"></small></span></div>' +
+      '<div class="say-meter" aria-hidden="true"><i id="sayFill"></i></div>' +
+      '<div class="say-btns"><button type="button" class="btn sm" id="sayPause" data-say="pause">Pause</button><button type="button" class="btn sm" id="sayStopBtn" data-say="stop">Stop</button>' +
+      '<label class="say-spd"><span class="sr">Speed</span><select id="saySpeedBar" aria-label="Reading speed">' + sayRateOpts() + '</select></label></div>' +
+      '<p class="say-hint" id="sayHint" role="status" aria-live="polite" hidden></p>';
+    document.body.appendChild(bar);
+    saySyncRate();
+    document.addEventListener('click', function (e) {
+      var t = e.target, b;
+      if (!t || !t.closest) return;
+      if ((b = t.closest('[data-listen]'))) {
+        var kind = b.getAttribute('data-listen');
+        if (SY.on && SY.kind === kind) sayStop(); else sayStart(kind);
+        return;
+      }
+      if ((b = t.closest('[data-say]'))) {
+        if (b.getAttribute('data-say') === 'stop') sayStop(); else sayPause();
+      }
+    });
+    document.addEventListener('change', function (e) {
+      var t = e.target;
+      if (!t || !t.id) return;
+      if (t.id === 'saySpeed' || t.id === 'saySpeedBar') saySetRate(t.value);
+      else if (t.id === 'sayVoice') saySetVoice(t.value);
+    });
+    try { window.speechSynthesis.onvoiceschanged = sayVoices; } catch (e) { /* ignore */ }
+    sayVoices();
+    setTimeout(sayVoices, 600);
+    window.addEventListener('pagehide', function () { sayCancel(); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden' && SY.on && !SY.paused) sayPause(); });
   }
 
   init();
@@ -7047,7 +7722,7 @@ body:not([data-step="0"]):not([data-step="4"]) .foot-pages { display: none; }
       if (!host) return;
       b = document.createElement('span');
       b.id = 'netBadge'; b.className = 'netbadge'; b.hidden = true; b.textContent = 'Offline';
-      b.title = 'No connection. Everything here still works. Only the links out need one.';
+      b.title = 'No connection. Everything here still works. Only the links out and Read it for me need one.';
       host.insertBefore(b, host.firstChild);
     }
     b.hidden = navigator.onLine !== false;
